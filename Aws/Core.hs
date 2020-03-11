@@ -96,56 +96,57 @@ where
 
 import           Aws.Ec2.InstanceMetadata
 import           Aws.Network
-import qualified Blaze.ByteString.Builder as Blaze
+import qualified Blaze.ByteString.Builder     as Blaze
 import           Control.Applicative
 import           Control.Arrow
-import qualified Control.Exception        as E
+import qualified Control.Exception            as E
 import           Control.Monad
 import           Control.Monad.IO.Class
-import           Control.Monad.Trans.Resource (ResourceT, MonadThrow (throwM))
-import qualified Crypto.Hash              as CH
-import qualified Crypto.MAC.HMAC          as CMH
-import qualified Data.Aeson               as A
-import qualified Data.ByteArray           as ByteArray
-import           Data.ByteString          (ByteString)
-import qualified Data.ByteString          as B
-import qualified Data.ByteString.Base16   as Base16
-import qualified Data.ByteString.Base64   as Base64
-import           Data.ByteString.Char8    ({- IsString -})
-import qualified Data.ByteString.Lazy     as L
-import qualified Data.ByteString.UTF8     as BU
+import           Control.Monad.Trans.Resource (MonadThrow (throwM), ResourceT)
+import qualified Crypto.Hash                  as CH
+import qualified Crypto.MAC.HMAC              as CMH
+import qualified Data.Aeson                   as A
+import qualified Data.ByteArray               as ByteArray
+import           Data.ByteString              (ByteString)
+import qualified Data.ByteString              as B
+import qualified Data.ByteString.Base16       as Base16
+import qualified Data.ByteString.Base64       as Base64
+import           Data.ByteString.Char8        ()
+import qualified Data.ByteString.Lazy         as L
+import qualified Data.ByteString.UTF8         as BU
 import           Data.Char
-import           Data.Conduit             ((.|))
-import qualified Data.Conduit             as C
+import           Data.Conduit                 ((.|))
+import qualified Data.Conduit                 as C
+import           System.IO                    (hPrint, stderr)
 #if MIN_VERSION_http_conduit(2,2,0)
-import qualified Data.Conduit.Binary      as CB
+import qualified Data.Conduit.Binary          as CB
 #endif
-import qualified Data.Conduit.List        as CL
+import qualified Data.Conduit.List            as CL
 import           Data.IORef
 import           Data.List
-import qualified Data.Map                 as M
+import qualified Data.Map                     as M
 import           Data.Maybe
 import           Data.Monoid
-import qualified Data.Text                as T
-import qualified Data.Text.Encoding       as T
-import qualified Data.Text.IO             as T
+import qualified Data.Text                    as T
+import qualified Data.Text.Encoding           as T
+import qualified Data.Text.IO                 as T
 import           Data.Time
-import qualified Data.Traversable         as Traversable
+import qualified Data.Traversable             as Traversable
 import           Data.Typeable
 import           Data.Word
-import qualified Network.HTTP.Conduit     as HTTP
-import qualified Network.HTTP.Client.TLS  as HTTP
-import qualified Network.HTTP.Types       as HTTP
+import qualified Network.HTTP.Client.TLS      as HTTP
+import qualified Network.HTTP.Conduit         as HTTP
+import qualified Network.HTTP.Types           as HTTP
 import           System.Directory
 import           System.Environment
-import           System.FilePath          ((</>))
+import           System.FilePath              ((</>))
 #if !MIN_VERSION_time(1,5,0)
 import           System.Locale
 #endif
-import qualified Text.XML                 as XML
-import qualified Text.XML.Cursor          as Cu
-import           Text.XML.Cursor          hiding (force, forceM)
 import           Prelude
+import qualified Text.XML                     as XML
+import           Text.XML.Cursor              hiding (force, forceM)
+import qualified Text.XML.Cursor              as Cu
 -------------------------------------------------------------------------------
 
 -- | Types that can be logged (textually).
@@ -157,7 +158,7 @@ class Loggable a where
 --
 -- Response forms a Writer-like monad.
 data Response m a = Response { responseMetadata :: m
-                             , responseResult :: Either E.SomeException a }
+                             , responseResult   :: Either E.SomeException a }
     deriving (Show, Functor)
 
 -- | Read a response result (if it's a success response, fail otherwise).
@@ -255,13 +256,13 @@ type V4Key = ((B.ByteString,B.ByteString),(B.ByteString,B.ByteString))
 data Credentials
     = Credentials {
         -- | AWS Access Key ID.
-        accessKeyID :: B.ByteString
+        accessKeyID     :: B.ByteString
         -- | AWS Secret Access Key.
       , secretAccessKey :: B.ByteString
         -- | Signing keys for signature version 4
-      , v4SigningKeys :: IORef [V4Key]
+      , v4SigningKeys   :: IORef [V4Key]
         -- | Signed IAM token
-      , iamToken :: Maybe B.ByteString
+      , iamToken        :: Maybe B.ByteString
       }
 instance Show Credentials where
     show c = "Credentials{accessKeyID=" ++ show (accessKeyID c) ++ ",secretAccessKey=" ++ show (secretAccessKey c) ++ ",iamToken=" ++ show (iamToken c) ++ "}"
@@ -310,7 +311,7 @@ loadCredentialsFromFile file key = liftIO $ do
         return (makeCredentials (T.encodeUtf8 keyID) (T.encodeUtf8 secret))
     else return Nothing
   where
-    hasKey _ [] = False
+    hasKey _ []       = False
     hasKey k (k2 : _) = k == k2
 
 -- | Load credentials from the environment variables @AWS_ACCESS_KEY_ID@ and @AWS_ACCESS_KEY_SECRET@
@@ -330,28 +331,39 @@ loadCredentialsFromInstanceMetadata = do
     mgr <- liftIO HTTP.getGlobalManager
     -- check if the path is routable
     avail <- liftIO $ hostAvailable "169.254.169.254"
+    liftIO $ print'  $ "1. avail: " ++ show avail
     if not avail
       then return Nothing
       else do
         info <- liftIO $ E.catch (getInstanceMetadata mgr "latest/meta-data/iam" "info" >>= return . Just) (\(_ :: HTTP.HttpException) -> return Nothing)
+        liftIO $ print'  $ "2. info: " ++ show info
         let infodict = info >>= A.decode :: Maybe (M.Map String String)
             info'    = infodict >>= M.lookup "InstanceProfileArn"
+        liftIO $ print'  $ "3. infodict: " ++ show infodict
+        liftIO $ print'  $ "4. info: " ++ show info'
         case info' of
           Just name ->
             do
               let name' = drop 1 $ dropWhile (/= '/') $ name
+              liftIO $ print'  $ "5. name': " ++ show name'
               creds <- liftIO $ E.catch (getInstanceMetadata mgr "latest/meta-data/iam/security-credentials" name' >>= return . Just) (\(_ :: HTTP.HttpException) -> return Nothing)
               -- this token lasts ~6 hours
+              liftIO $ print'  $ "6. creds: " ++ show creds
               let dict   = creds >>= A.decode :: Maybe (M.Map String String)
                   keyID  = dict  >>= M.lookup "AccessKeyId"
                   secret = dict  >>= M.lookup "SecretAccessKey"
                   token  = dict  >>= M.lookup "Token"
+              liftIO $ print'  $ "7. dict: " ++ show dict
+              liftIO $ print'  $ "8. keyID: " ++ show keyID
+              liftIO $ print'  $ "9. secret: " ++ show secret
+              liftIO $ print'  $ "10. token: " ++ show token
               ref <- liftIO $ newIORef []
               return (Credentials <$> (T.encodeUtf8 . T.pack <$> keyID)
                                   <*> (T.encodeUtf8 . T.pack <$> secret)
                                   <*> return ref
                                   <*> (Just . T.encodeUtf8 . T.pack <$> token))
           Nothing -> return Nothing
+   where print' = hPrint stderr
 
 -- | Load credentials from environment variables if possible, or alternatively from a file with a given key name.
 --
@@ -402,7 +414,7 @@ data Protocol
 
 -- | The default port to be used for a protocol if no specific port is specified.
 defaultPort :: Protocol -> Int
-defaultPort HTTP = 80
+defaultPort HTTP  = 80
 defaultPort HTTPS = 443
 
 -- | Request method. Not all request methods are supported by all services.
@@ -429,33 +441,33 @@ httpMethod Delete    = "DELETE"
 data SignedQuery
     = SignedQuery {
         -- | Request method.
-        sqMethod :: !Method
+        sqMethod        :: !Method
         -- | Protocol to be used.
-      , sqProtocol :: !Protocol
+      , sqProtocol      :: !Protocol
         -- | HTTP host.
-      , sqHost :: !B.ByteString
+      , sqHost          :: !B.ByteString
         -- | IP port.
-      , sqPort :: !Int
+      , sqPort          :: !Int
         -- | HTTP path.
-      , sqPath :: !B.ByteString
+      , sqPath          :: !B.ByteString
         -- | Query string list (used with 'Get' and 'PostQuery').
-      , sqQuery :: !HTTP.Query
+      , sqQuery         :: !HTTP.Query
         -- | Request date/time.
-      , sqDate :: !(Maybe UTCTime)
+      , sqDate          :: !(Maybe UTCTime)
         -- | Authorization string (if applicable), for @Authorization@ header.  See 'authorizationV4'
       , sqAuthorization :: !(Maybe (IO B.ByteString))
         -- | Request body content type.
-      , sqContentType :: !(Maybe B.ByteString)
+      , sqContentType   :: !(Maybe B.ByteString)
         -- | Request body content MD5.
-      , sqContentMd5 :: !(Maybe (CH.Digest CH.MD5))
+      , sqContentMd5    :: !(Maybe (CH.Digest CH.MD5))
         -- | Additional Amazon "amz" headers.
-      , sqAmzHeaders :: !HTTP.RequestHeaders
+      , sqAmzHeaders    :: !HTTP.RequestHeaders
         -- | Additional non-"amz" headers.
-      , sqOtherHeaders :: !HTTP.RequestHeaders
+      , sqOtherHeaders  :: !HTTP.RequestHeaders
         -- | Request body (used with 'Post' and 'Put').
-      , sqBody :: !(Maybe HTTP.RequestBody)
+      , sqBody          :: !(Maybe HTTP.RequestBody)
         -- | String to sign. Note that the string is already signed, this is passed mostly for debugging purposes.
-      , sqStringToSign :: !B.ByteString
+      , sqStringToSign  :: !B.ByteString
       }
     --deriving (Show)
 
@@ -466,7 +478,7 @@ queryToHttpRequest SignedQuery{..} =  do
     return $ HTTP.defaultRequest {
         HTTP.method = httpMethod sqMethod
       , HTTP.secure = case sqProtocol of
-                        HTTP -> False
+                        HTTP  -> False
                         HTTPS -> True
       , HTTP.host = sqHost
       , HTTP.port = sqPort
@@ -509,7 +521,7 @@ queryToHttpRequest SignedQuery{..} =  do
       contentType = sqContentType `mplus` defContentType
       defContentType = case sqMethod of
                          PostQuery -> Just "application/x-www-form-urlencoded; charset=utf-8"
-                         _ -> Nothing
+                         _         -> Nothing
 
 -- | Create a URI fro a 'SignedQuery' object.
 --
@@ -518,7 +530,7 @@ queryToUri :: SignedQuery -> B.ByteString
 queryToUri SignedQuery{..}
     = B.concat [
        case sqProtocol of
-         HTTP -> "http://"
+         HTTP  -> "http://"
          HTTPS -> "https://"
       , sqHost
       , if sqPort == defaultPort sqProtocol then "" else T.encodeUtf8 . T.pack $ ':' : show sqPort
@@ -544,7 +556,7 @@ data AbsoluteTimeInfo
 -- | Just the UTC time value.
 fromAbsoluteTimeInfo :: AbsoluteTimeInfo -> UTCTime
 fromAbsoluteTimeInfo (AbsoluteTimestamp time) = time
-fromAbsoluteTimeInfo (AbsoluteExpires time) = time
+fromAbsoluteTimeInfo (AbsoluteExpires time)   = time
 
 -- | Convert 'TimeInfo' to 'AbsoluteTimeInfo' given the current UTC time.
 makeAbsoluteTimeInfo :: TimeInfo -> UTCTime -> AbsoluteTimeInfo
@@ -556,9 +568,9 @@ makeAbsoluteTimeInfo (ExpiresIn s) now = AbsoluteExpires $ addUTCTime s now
 data SignatureData
     = SignatureData {
         -- | Expiration or timestamp.
-        signatureTimeInfo :: AbsoluteTimeInfo
+        signatureTimeInfo    :: AbsoluteTimeInfo
         -- | Current time.
-      , signatureTime :: UTCTime
+      , signatureTime        :: UTCTime
         -- | Access credentials.
       , signatureCredentials :: Credentials
       }
@@ -591,7 +603,7 @@ data AuthorizationHash
 
 -- | Authorization hash identifier as expected by Amazon.
 amzHash :: AuthorizationHash -> B.ByteString
-amzHash HmacSHA1 = "HmacSHA1"
+amzHash HmacSHA1   = "HmacSHA1"
 amzHash HmacSHA256 = "HmacSHA256"
 
 -- | Create a signature. Usually, AWS wants a specifically constructed string to be signed.
@@ -601,7 +613,7 @@ signature :: Credentials -> AuthorizationHash -> B.ByteString -> B.ByteString
 signature cr ah input = Base64.encode sig
     where
       sig = case ah of
-              HmacSHA1 -> ByteArray.convert (CMH.hmac (secretAccessKey cr) input :: CMH.HMAC CH.SHA1)
+              HmacSHA1   -> ByteArray.convert (CMH.hmac (secretAccessKey cr) input :: CMH.HMAC CH.SHA1)
               HmacSHA256 -> ByteArray.convert (CMH.hmac (secretAccessKey cr) input :: CMH.HMAC CH.SHA256)
 
 
@@ -690,7 +702,7 @@ constructAuthorizationV4Header sd ah region service headers sig = B.concat
     ]
     where
         alg = case ah of
-            HmacSHA1 -> "AWS4-HMAC-SHA1"
+            HmacSHA1   -> "AWS4-HMAC-SHA1"
             HmacSHA256 -> "AWS4-HMAC-SHA256"
 
 -- | Compute the signature for V4
@@ -706,13 +718,13 @@ signatureV4WithKey sd ah region service canonicalRequest key = Base16.encode $ m
     where
         date = fmtTime "%Y%m%d" $ signatureTime sd
         mkHmac k i = case ah of
-            HmacSHA1 -> ByteArray.convert (CMH.hmac k i :: CMH.HMAC CH.SHA1)
+            HmacSHA1   -> ByteArray.convert (CMH.hmac k i :: CMH.HMAC CH.SHA1)
             HmacSHA256 -> ByteArray.convert (CMH.hmac k i :: CMH.HMAC CH.SHA256)
         mkHash i = case ah of
-            HmacSHA1 -> ByteArray.convert (CH.hash i :: CH.Digest CH.SHA1)
+            HmacSHA1   -> ByteArray.convert (CH.hash i :: CH.Digest CH.SHA1)
             HmacSHA256 -> ByteArray.convert (CH.hash i :: CH.Digest CH.SHA256)
         alg = case ah of
-            HmacSHA1 -> "AWS4-HMAC-SHA1"
+            HmacSHA1   -> "AWS4-HMAC-SHA1"
             HmacSHA256 -> "AWS4-HMAC-SHA256"
 
         -- now do the signature
@@ -740,7 +752,7 @@ signingKeyV4
 signingKeyV4 sd ah region service = kSigning
     where
         mkHmac k i = case ah of
-            HmacSHA1 -> ByteArray.convert (CMH.hmac k i :: CMH.HMAC CH.SHA1)
+            HmacSHA1   -> ByteArray.convert (CMH.hmac k i :: CMH.HMAC CH.SHA1)
             HmacSHA256 -> ByteArray.convert (CMH.hmac k i :: CMH.HMAC CH.SHA256)
         date = fmtTime "%Y%m%d" $ signatureTime sd
         secretKey = secretAccessKey $ signatureCredentials sd
@@ -787,7 +799,7 @@ queryList f prefix xs = concat $ zipWith combine prefixList (map f xs)
 
 -- | A \"true\"/\"false\" boolean as requested by some services.
 awsBool :: Bool -> B.ByteString
-awsBool True = "true"
+awsBool True  = "true"
 awsBool False = "false"
 
 -- | \"true\"
@@ -905,7 +917,7 @@ textReadBool :: MonadThrow m => T.Text -> m Bool
 textReadBool s = case T.unpack s of
                   "true"  -> return True
                   "false" -> return False
-                  _        -> throwM $ XmlException "Invalid Bool"
+                  _       -> throwM $ XmlException "Invalid Bool"
 
 -- | Read an integer from a 'T.Text', throwing an 'XmlException' on failure.
 textReadInt :: (MonadThrow m, Num a) => T.Text -> m a
